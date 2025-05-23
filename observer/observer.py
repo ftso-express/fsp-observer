@@ -1,9 +1,9 @@
 import copy
 import enum
 import io
-import logging
 import time
 from typing import Self
+from aiohttp import ClientSession
 
 import requests
 from attrs import define
@@ -49,11 +49,19 @@ from observer.types import (
     VoterRemoved,
 )
 
-LOGGER = logging.getLogger(__name__)
-logging.basicConfig(
-    format="%(asctime)s\t%(levelname)s\t%(name)s\t%(message)s",
-    level="INFO",
-)
+# from aioprometheus import Counter, Gauge
+from aioprometheus.service import Service
+from prometheus.metrics import PROM_EVENT_COUNTER, PROM_LOG_MESSAGES_SENT, PROM_BLOCK_NUMBER
+
+from aiohttp import ClientSession
+
+from loguru import logger as LOGGER
+LOGGER.info("Initialised")
+
+from rich import print as rprint
+from rich.pretty import pprint as pp
+from rich.traceback import install
+install(show_locals=True)
 
 
 class Signature(EthSignature):
@@ -74,6 +82,7 @@ def notify_discord(config: NotificationDiscord, message: str) -> None:
         headers={"Content-Type": "application/json"},
         json={"content": message},
     )
+    PROM_LOG_MESSAGES_SENT.inc({"type": "discord"})
 
 
 def notify_slack(config: NotificationSlack, message: str) -> None:
@@ -82,14 +91,25 @@ def notify_slack(config: NotificationSlack, message: str) -> None:
         headers={"Content-Type": "application/json"},
         json={"text": message},
     )
+    PROM_LOG_MESSAGES_SENT.inc({"type": "slack"})
 
 
-def notify_telegram(config: NotificationTelegram, message: str) -> None:
-    requests.post(
-        f"https://api.telegram.org/bot{config.bot_token}/sendMessage",
-        headers={"Content-Type": "application/json"},
-        json={"chat_id": config.chat_id, "text": message},
-    )
+async def notify_telegram(config: NotificationTelegram, message: str) -> None:
+    LOGGER.debug(f"{message}")
+    # pp(config)
+    if config.bot_token is None:
+        return
+    async with ClientSession() as session:
+        url = f"https://api.telegram.org/bot{config.bot_token}/sendMessage"
+        params = {"chat_id": config.chat_id, "text": message}
+        async with session.get(url, params=params) as response:
+            result = await response.json()
+            if not result["ok"]:
+                raise ValueError(
+                    f"Telegram Error [{result['error_code']}]: {result['description']}"
+                )
+            PROM_LOG_MESSAGES_SENT.inc({"type": "telegram"})
+            return result
 
 
 def notify_generic(config: NotificationGeneric, issue: "Issue") -> None:
@@ -98,6 +118,7 @@ def notify_generic(config: NotificationGeneric, issue: "Issue") -> None:
         headers={"Content-Type": "application/json"},
         json={"level": issue.level.value, "message": issue.message},
     )
+    PROM_LOG_MESSAGES_SENT.inc({"type": "generic"})
 
 
 async def find_voter_registration_blocks(
@@ -286,7 +307,7 @@ class MessageBuilder:
         return self
 
 
-def log_issue(config: Configuration, issue: Issue):
+async def log_issue(config: Configuration, issue: Issue):
     LOGGER.log(issue.level.value, issue.message)
 
     n = config.notification
@@ -298,7 +319,10 @@ def log_issue(config: Configuration, issue: Issue):
         notify_slack(n.slack, issue.level.name + " " + issue.message)
 
     if n.telegram is not None:
-        notify_telegram(n.telegram, issue.level.name + " " + issue.message)
+        await notify_telegram(n.telegram, issue.level.name + " " + issue.message)
+        PROM_EVENT_COUNTER.inc(
+            {"type": "log_issue", "telegram": "telegram"}
+        )
 
     if n.generic is not None:
         notify_generic(n.generic, issue)
@@ -371,6 +395,9 @@ def validate_ftso(round: VotingRound, entity: Entity, config: Configuration):
                 mb.build_with_message("no submit1 transaction"),
             )
         )
+        PROM_EVENT_COUNTER.inc(
+            { "type": "no_submit1_transaction" }
+        )
 
     if s1 and not s2:
         issues.append(
@@ -378,6 +405,9 @@ def validate_ftso(round: VotingRound, entity: Entity, config: Configuration):
                 IssueLevel.CRITICAL,
                 mb.build_with_message("no submit2 transaction, causing reveal offence"),
             ),
+        )        
+        PROM_EVENT_COUNTER.inc(
+            { "type": "no_submit2_transaction" }
         )
 
     if s2:
@@ -393,6 +423,9 @@ def validate_ftso(round: VotingRound, entity: Entity, config: Configuration):
                         f"submit 2 had 'None' on indices {', '.join(indices)}"
                     ),
                 )
+            )
+            PROM_EVENT_COUNTER.inc(
+                {"type": "submit2_none_indices" }
             )
 
     if s1 and s2:
@@ -411,6 +444,9 @@ def validate_ftso(round: VotingRound, entity: Entity, config: Configuration):
                         "commit hash and reveal didn't match, causing reveal offence"
                     ),
                 ),
+            )
+            PROM_EVENT_COUNTER.inc(
+                {"type": "commit_hash_and_reveal_diff" }
             )
 
     if not ss:
@@ -538,6 +574,18 @@ async def observer_loop(config: Configuration) -> None:
         middleware=[ExtraDataToPOAMiddleware],
     )
 
+    # Prometheus - start
+    service = Service()
+    await service.start(addr="0.0.0.0", port=9000)
+    LOGGER.info(f"Serving prometheus metrics on: {service.metrics_url}")
+
+    # Send notification with application name
+    app_name = config.app_name
+    startup_message = f"Application {app_name} started in Docker"
+    # notify_discord(config, startup_message)
+    _issue = Issue(IssueLevel.ERROR,startup_message)
+    await log_issue(config, _issue)
+
     # log_issue(
     #     config,
     #     Issue(
@@ -572,6 +620,18 @@ async def observer_loop(config: Configuration) -> None:
     lower_block_id, end_block_id = await find_voter_registration_blocks(
         w, block["number"], reward_epoch
     )
+    PROM_BLOCK_NUMBER.set(
+        {
+            "type": "lower_block_id"
+        },
+        lower_block_id
+    )
+    PROM_BLOCK_NUMBER.set(
+        {
+            "type": "end_block_id"
+        },
+        end_block_id
+    )
 
     # get informations for events that build the current signing policy
     signing_policy = await get_signing_policy_events(
@@ -589,7 +649,7 @@ async def observer_loop(config: Configuration) -> None:
 
     # set up target address from config
     tia = w.to_checksum_address(config.identity_address)
-    log_issue(
+    await log_issue(
         config,
         Issue(
             IssueLevel.INFO,
@@ -790,10 +850,17 @@ async def observer_loop(config: Configuration) -> None:
                 for i in validate_ftso(
                     r, signing_policy.entity_mapper.by_identity_address[tia], config
                 ):
-                    log_issue(config, i)
+                    await log_issue(config, i)
                 for i in validate_fdc(
                     r, signing_policy.entity_mapper.by_identity_address[tia], config
                 ):
-                    log_issue(config, i)
+                    await log_issue(config, i)
 
         block_number = latest_block
+        PROM_BLOCK_NUMBER.set(
+            {
+                "type": "current"
+            },
+            latest_block
+        )        
+        LOGGER.debug(f"{block_number = }")

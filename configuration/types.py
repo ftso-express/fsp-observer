@@ -210,6 +210,7 @@ class Notification:
 
 @frozen
 class Configuration:
+    app_name: str | None
     identity_address: ChecksumAddress
     chain_id: int
     contracts: Contracts

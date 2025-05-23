@@ -1,0 +1,75 @@
+---
+name: "${DOCKER_COMPOSE_NAME}"
+
+# x-common-labels: &common-labels
+#   production_status: ${LABELS_PRODUCTION_STATUS}
+#   network_name: ${LABELS_NETWORK_NAME}
+#   network_type: ${LABELS_NETWORK_TYPE}
+#   node_role: ${LABELS_NODE_ROLE}
+#   node_name: ${LABELS_NODE_NAME}
+#   sub_system_key: ${LABELS_SUB_SYSTEM_KEY}
+#   sub_system_name: ${LABELS_SUB_SYSTEM_NAME}
+
+# x-logging-settings-gelf: &logging-settings-gelf
+#   logging:
+#     driver: gelf
+#     options:
+#       gelf-address: "${GRAYLOG_PROTOCOL}://${GRAYLOG_HOST}:${GRAYLOG_PORT}" # Logstash UDP input port      
+#       tag: "${GRAYLOG_TAG}"
+#       gelf-compression-type: none
+#       labels: "${GRAYLOG_LABELS}"
+#       env: "${GRAYLOG_ENV}"
+
+# x-logging-settings-local: &logging-settings-local
+#   logging: 
+#     driver: "local" 
+#     options: 
+#       max-size: "10m" 
+#       max-file: "3"
+
+# x-logging-settings-json: &logging-settings-json
+#   logging: 
+#     driver: "json-file"
+#     options: 
+#       max-size: "10m" 
+#       max-file: "3"
+#       labels: "${GRAYLOG_LABELS}"
+#       env: "${GRAYLOG_ENV}"
+
+x-logging-settings-journald: &logging-settings-journald
+  logging: 
+    driver: "journald" 
+    options:
+      tag: "{{.ImageName}}/{{.Name}}/{{.ID}}"
+      labels: "${GRAYLOG_LABELS}"
+      env: "${GRAYLOG_ENV}"
+
+x-general-settings: &general-settings
+  restart: unless-stopped
+  # restart: no
+  stdin_open: true # docker run -i
+  tty: true        # docker run -t
+  # env_file: 
+  #   - .env
+
+services:
+  flare-fsp-observer:
+    image: "${DOCKER_COMPOSE_IMAGE}"
+    hostname: "${DOCKER_COMPOSE_NAME}-flare"
+    container_name: "${DOCKER_COMPOSE_NAME}-flare"
+    env_file: 
+    - ./configuration/app/flare.env
+    <<: [ *logging-settings-journald, *general-settings ]
+    ports: 
+      - 0.0.0.0:9001:9000
+  
+  songbird-fsp-observer:
+    image: "${DOCKER_COMPOSE_IMAGE}"
+    hostname: "${DOCKER_COMPOSE_NAME}-songbird"
+    container_name: "${DOCKER_COMPOSE_NAME}-songbird"
+    env_file: 
+    - ./configuration/app/songbird.env
+    <<: [ *logging-settings-journald, *general-settings ]
+    ports: 
+      - 0.0.0.0:9002:9000
+    

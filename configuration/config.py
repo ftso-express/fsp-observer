@@ -100,6 +100,7 @@ def get_notification_config() -> Notification:
 
 
 def get_config() -> Configuration:
+    app_name=os.getenv("APP_NAME", "Flare-Observer"),
     rpc_url = os.environ.get("RPC_URL")
 
     if rpc_url is None:
@@ -118,6 +119,7 @@ def get_config() -> Configuration:
         raise ConfigError("IDENTITY_ADDRESS environment variable must be set.")
 
     config = Configuration(
+        app_name=app_name,
         rpc_url=rpc_url,
         identity_address=to_checksum_address(identity_address),
         chain_id=chain_id,
