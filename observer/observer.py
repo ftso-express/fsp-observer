@@ -25,11 +25,9 @@ from configuration.types import (
 from observer.reward_epoch_manager import (
     Entity,
     SigningPolicy,
-    VotingRound,
-    VotingRoundManager,
-    WTxData,
 )
 from observer.types import (
+    AttestationRequest,
     ProtocolMessageRelayed,
     RandomAcquisitionStarted,
     SigningPolicyInitialized,
@@ -41,6 +39,11 @@ from observer.types import (
 
 from .message import Message, MessageLevel
 from .notification import notify_discord, notify_generic, notify_slack, notify_telegram
+from .voting_round import (
+    VotingRound,
+    VotingRoundManager,
+    WTxData,
+)
 
 LOGGER = logging.getLogger(__name__)
 logging.basicConfig(
@@ -230,22 +233,20 @@ def validate_ftso(round: VotingRound, entity: Entity, config: Configuration):
     ftso = round.ftso
     finalization = ftso.finalization
 
-    _submit1 = ftso.submit_1.by_identity.get(entity.identity_address, [])
-    submit_1 = extract(_submit1, epoch.id, range(epoch.start_s, epoch.end_s))
+    _submit1 = ftso.submit_1.by_identity[entity.identity_address]
+    submit_1 = _submit1.extract_latest(range(epoch.start_s, epoch.end_s))
 
-    _submit2 = ftso.submit_2.by_identity.get(entity.identity_address, [])
-    submit_2 = extract(
-        _submit2, epoch.id, range(epoch.next.start_s, epoch.next.reveal_deadline())
+    _submit2 = ftso.submit_2.by_identity[entity.identity_address]
+    submit_2 = _submit2.extract_latest(
+        range(epoch.next.start_s, epoch.next.reveal_deadline())
     )
 
     sig_grace = max(
         epoch.next.start_s + 55 + 1, (finalization and finalization.timestamp + 1) or 0
     )
-    _submit_sig = ftso.submit_signatures.by_identity.get(entity.identity_address, [])
-    submit_sig = extract(
-        _submit_sig,
-        epoch.id,
-        range(epoch.next.reveal_deadline(), sig_grace),
+    _submit_sig = ftso.submit_signatures.by_identity[entity.identity_address]
+    submit_sig = _submit_sig.extract_latest(
+        range(epoch.next.reveal_deadline(), sig_grace)
     )
 
     # TODO:(matej) check for transactions that happened too late (or too early)
@@ -268,7 +269,9 @@ def validate_ftso(round: VotingRound, entity: Entity, config: Configuration):
 
     if s2:
         indices = [
-            str(i) for i, v in enumerate(submit_2[0].payload.values) if v is None
+            str(i)
+            for i, v in enumerate(submit_2.parsed_payload.payload.values)
+            if v is None
         ]
 
         if indices:
@@ -281,13 +284,13 @@ def validate_ftso(round: VotingRound, entity: Entity, config: Configuration):
 
     if s1 and s2:
         # TODO:(matej) should just build back from parsed message
-        bp = ByteParser(parse_generic_tx(submit_2[1].input).ftso.payload)  # type: ignore
+        bp = ByteParser(parse_generic_tx(submit_2.wtx_data.input).ftso.payload)
         rnd = bp.uint256()
         feed_v = bp.drain()
 
         hashed = commit_hash(entity.submit_address, epoch.id, rnd, feed_v)
 
-        if submit_1[0].payload.commit_hash.hex() != hashed:
+        if submit_1.parsed_payload.payload.commit_hash.hex() != hashed:
             issues.append(
                 mb.build(
                     MessageLevel.CRITICAL,
@@ -301,7 +304,7 @@ def validate_ftso(round: VotingRound, entity: Entity, config: Configuration):
         )
 
     if finalization and ss:
-        s = Signature.from_vrs(submit_sig[0].payload.signature)
+        s = Signature.from_vrs(submit_sig.parsed_payload.payload.signature)
         addr = s.recover_public_key_from_msg_hash(
             finalization.to_message()
         ).to_checksum_address()
@@ -328,28 +331,39 @@ def validate_fdc(round: VotingRound, entity: Entity, config: Configuration):
     fdc = round.fdc
     finalization = fdc.finalization
 
-    _submit1 = fdc.submit_1.by_identity.get(entity.identity_address, [])
-    submit_1 = extract(_submit1, epoch.id, range(epoch.start_s, epoch.end_s))
+    _submit1 = fdc.submit_1.by_identity[entity.identity_address]
+    submit_1 = _submit1.extract_latest(range(epoch.start_s, epoch.end_s))
 
-    _submit2 = fdc.submit_2.by_identity.get(entity.identity_address, [])
-    submit_2 = extract(
-        _submit2, epoch.id, range(epoch.next.start_s, epoch.next.reveal_deadline())
+    _submit2 = fdc.submit_2.by_identity[entity.identity_address]
+    submit_2 = _submit2.extract_latest(
+        range(epoch.next.start_s, epoch.next.reveal_deadline())
     )
 
     sig_grace = max(
         epoch.next.start_s + 55 + 1, (finalization and finalization.timestamp + 1) or 0
     )
-    _submit_sig = fdc.submit_signatures.by_identity.get(entity.identity_address, [])
-    submit_sig = extract(
-        _submit_sig,
-        epoch.id,
-        range(epoch.next.reveal_deadline(), sig_grace),
+    _submit_sig = fdc.submit_signatures.by_identity[entity.identity_address]
+    submit_sig = _submit_sig.extract_latest(
+        range(epoch.next.reveal_deadline(), sig_grace)
     )
-    submit_sig_deadline = extract(
-        _submit_sig,
-        epoch.id,
-        range(epoch.next.reveal_deadline(), epoch.next.end_s),
+    submit_sig_deadline = _submit_sig.extract_latest(
+        range(epoch.next.reveal_deadline(), epoch.next.end_s)
     )
+
+    # TODO:(matej) move this to py-flare-common
+    bp = ByteParser(
+        sorted(fdc.consensus_bitvote.items(), key=lambda x: x[1], reverse=True)[0][0]
+    )
+    n_requests = bp.uint16()
+    votes = bp.drain()
+    consensus_bitvote = [False for _ in range(n_requests)]
+    for j, byte in enumerate(reversed(votes)):
+        for shift in range(8):
+            i = n_requests - 1 - j * 8 - shift
+            if i < 0 and (byte >> shift) & 1 == 1:
+                raise ValueError("Invalid payload length.")
+            elif i >= 0:
+                consensus_bitvote[i] = (byte >> shift) & 1 == 1
 
     # TODO:(matej) check for transactions that happened too late (or too early)
 
@@ -360,6 +374,9 @@ def validate_fdc(round: VotingRound, entity: Entity, config: Configuration):
     ss = submit_sig is not None
     ssd = submit_sig_deadline is not None
 
+    sorted_requests = fdc.requests.sorted()
+    assert len(sorted_requests) == n_requests
+
     if not s1:
         # NOTE:(matej) this is expected behaviour in fdc
         pass
@@ -367,12 +384,40 @@ def validate_fdc(round: VotingRound, entity: Entity, config: Configuration):
     if not s2:
         issues.append(mb.build(MessageLevel.ERROR, "no submit2 transaction"))
 
+    expected_signatures = True
+    # TODO:(matej) unnest some
     if s2:
-        # TODO:(matej) analize request array and report unproven errors
-        ...
+        if submit_2.parsed_payload.payload.number_of_requests != len(sorted_requests):
+            issues.append(
+                mb.build(
+                    MessageLevel.ERROR,
+                    "submit 2 length didn't match number of requests in round",
+                )
+            )
+            expected_signatures = False
+        else:
+            for i, (r, bit, cbit) in enumerate(
+                zip(
+                    sorted_requests,
+                    submit_2.parsed_payload.payload.bit_vector,
+                    consensus_bitvote,
+                )
+            ):
+                idx = n_requests - 1 - i
+                at = r.attestation_type
+                si = r.source_id
 
-    if s2 and not ssd:
-        # TODO:(matej) check if submit2 bitvote dominated consensus bitvote
+                if cbit and not bit:
+                    issues.append(
+                        mb.build(
+                            MessageLevel.ERROR,
+                            "submit2 didn't confirm request that was part of consensus "
+                            f"{at.representation}/{si.representation} at index {idx}",
+                        )
+                    )
+                    expected_signatures = False
+
+    if s2 and expected_signatures and not ssd:
         issues.append(
             mb.build(
                 MessageLevel.CRITICAL,
@@ -397,7 +442,7 @@ def validate_fdc(round: VotingRound, entity: Entity, config: Configuration):
         )
 
     if finalization and ss:
-        s = Signature.from_vrs(submit_sig[0].payload.signature)
+        s = Signature.from_vrs(submit_sig.parsed_payload.payload.signature)
         addr = s.recover_public_key_from_msg_hash(
             finalization.to_message()
         ).to_checksum_address()
@@ -470,6 +515,7 @@ async def observer_loop(config: Configuration) -> None:
 
     # set up target address from config
     tia = w.to_checksum_address(config.identity_address)
+    # TODO:(matej) log version and initial voting round, maybe signing policy info
     log_issue(
         config,
         Message.builder()
@@ -520,6 +566,7 @@ async def observer_loop(config: Configuration) -> None:
         config.contracts.VoterRegistry,
         config.contracts.FlareSystemsManager,
         config.contracts.FlareSystemsCalculator,
+        config.contracts.FdcHub,
     ]
     event_signatures = {e.signature: e for c in contracts for e in c.events.values()}
 
@@ -584,6 +631,10 @@ async def observer_loop(config: Configuration) -> None:
                                 voting_round.ftso.finalization = e
                             if e.protocol_id == 200:
                                 voting_round.fdc.finalization = e
+
+                        case "AttestationRequest":
+                            e = AttestationRequest.from_dict(data, voting_epoch)
+                            vrm.get(e.voting_epoch_id).fdc.requests.agg.append(e)
 
                         case "SigningPolicyInitialized":
                             e = SigningPolicyInitialized.from_dict(data["args"])
@@ -656,11 +707,17 @@ async def observer_loop(config: Configuration) -> None:
                                         entity, parsed.ftso, wtx
                                     )
                                 if parsed.fdc is not None:
-                                    vrm.get(
-                                        ve(parsed.fdc.voting_round_id)
-                                    ).fdc.insert_submit_signatures(
+                                    vr = vrm.get(ve(parsed.fdc.voting_round_id))
+                                    vr.fdc.insert_submit_signatures(
                                         entity, parsed.fdc, wtx
                                     )
+
+                                    # NOTE:(matej) this is currently the easies way to
+                                    # get consensus bitvote
+                                    vr.fdc.consensus_bitvote[
+                                        parsed.fdc.payload.unsigned_message
+                                    ] += 1
+
                             except Exception:
                                 pass
 

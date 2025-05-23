@@ -4,7 +4,10 @@ from attrs import frozen
 from eth_account.messages import _hash_eip191_message, encode_defunct
 from eth_typing import ChecksumAddress
 from eth_utils.crypto import keccak
-from web3.types import BlockData
+from py_flare_common.fdc.attestation_source import AttestationSource
+from py_flare_common.fdc.attestation_type import AttestationType
+from py_flare_common.fsp.epoch.epoch import VotingEpoch
+from web3.types import BlockData, EventData
 
 
 @frozen
@@ -149,4 +152,31 @@ class RandomAcquisitionStarted:
         return cls(
             reward_epoch_id=int(d["rewardEpochId"]),
             timestamp=int(d["timestamp"]),
+        )
+
+
+@frozen
+class AttestationRequest:
+    log_index: int
+    block: int
+    voting_epoch_id: VotingEpoch
+    data: bytes
+
+    @property
+    def attestation_type(self) -> AttestationType:
+        return AttestationType(self.data[0:32])
+
+    @property
+    def source_id(self) -> AttestationSource:
+        return AttestationSource(self.data[32:64])
+
+    @classmethod
+    def from_dict(cls, data: EventData, voting_epoch: VotingEpoch) -> Self:
+        d = data["args"]
+
+        return cls(
+            log_index=data["logIndex"],
+            block=data["blockNumber"],
+            voting_epoch_id=voting_epoch,
+            data=d["data"],
         )

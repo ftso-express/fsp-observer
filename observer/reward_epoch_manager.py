@@ -2,20 +2,9 @@ from typing import Self
 
 from attrs import define, field, frozen
 from eth_typing import ChecksumAddress
-from hexbytes import HexBytes
-from py_flare_common.fsp.epoch.epoch import RewardEpoch, VotingEpoch
-from py_flare_common.fsp.messaging.types import (
-    FdcSubmit1,
-    FdcSubmit2,
-    FtsoSubmit1,
-    FtsoSubmit2,
-    ParsedPayload,
-    SubmitSignatures,
-)
-from web3.types import BlockData, TxData
+from py_flare_common.fsp.epoch.epoch import RewardEpoch
 
 from .types import (
-    ProtocolMessageRelayed,
     RandomAcquisitionStarted,
     SigningPolicyInitialized,
     VotePowerBlockSelected,
@@ -23,49 +12,6 @@ from .types import (
     VoterRegistrationInfo,
     VoterRemoved,
 )
-
-
-@frozen
-class WTxData:
-    wrapped: TxData
-    hash: HexBytes
-    to_address: ChecksumAddress | None
-    input: HexBytes
-    block_number: int
-    timestamp: int
-    transaction_index: int
-    from_address: ChecksumAddress
-    value: int
-
-    def is_first_or_second(self) -> bool:
-        return (
-            True
-            if self.transaction_index == 0 or self.transaction_index == 1
-            else False
-        )
-
-    @classmethod
-    def from_tx_data(cls, tx_data: TxData, block_data: BlockData) -> Self:
-        assert "hash" in tx_data
-        assert "input" in tx_data
-        assert "blockNumber" in tx_data
-        assert "transactionIndex" in tx_data
-        assert "from" in tx_data
-        assert "value" in tx_data
-
-        assert "timestamp" in block_data
-
-        return cls(
-            wrapped=tx_data,
-            hash=tx_data["hash"],
-            to_address=tx_data.get("to"),
-            input=tx_data["input"],
-            block_number=tx_data["blockNumber"],
-            transaction_index=tx_data["transactionIndex"],
-            from_address=tx_data["from"],
-            value=tx_data["value"],
-            timestamp=block_data["timestamp"],
-        )
 
 
 @frozen
@@ -277,85 +223,3 @@ class SigningPolicyBuilder:
             entities=entities,
             entity_mapper=mapper,
         )
-
-
-@define
-class ParsedPayloadMapper[T]:
-    by_identity: dict[ChecksumAddress, list[tuple[ParsedPayload[T], WTxData]]] = field(
-        factory=dict
-    )
-    # by_submit: dict[ChecksumAddress, list[ParsedMessage[T, U]]] = field(factory=dict)
-    # by_signatures: dict[ChecksumAddress, list[ParsedMessage[T, U]]] = field(
-    #     factory=dict
-    # )
-    # by_signing: dict[ChecksumAddress, list[ParsedMessage[T, U]]] = field(factory=dict)
-    # by_delegation: dict[ChecksumAddress, list[ParsedMessage[T, U]]] = field(
-    #     factory=dict
-    # )
-
-    def insert(self, r: Entity, s: ParsedPayload[T], tx: WTxData):
-        if r.identity_address not in self.by_identity:
-            self.by_identity[r.identity_address] = []
-        self.by_identity[r.identity_address].append((s, tx))
-
-
-@define
-class VotingRoundProtocol[S1, S2, SS]:
-    submit_1: ParsedPayloadMapper[S1] = field(factory=ParsedPayloadMapper)
-    submit_2: ParsedPayloadMapper[S2] = field(factory=ParsedPayloadMapper)
-    submit_signatures: ParsedPayloadMapper[SS] = field(factory=ParsedPayloadMapper)
-    finalization: ProtocolMessageRelayed | None = None
-
-    def insert_submit_1(self, e: Entity, s: ParsedPayload[S1], tx: WTxData) -> None:
-        self.submit_1.insert(e, s, tx)
-
-    def insert_submit_2(self, e: Entity, s: ParsedPayload[S2], tx: WTxData) -> None:
-        self.submit_2.insert(e, s, tx)
-
-    def insert_submit_signatures(
-        self, e: Entity, s: ParsedPayload[SS], tx: WTxData
-    ) -> None:
-        self.submit_signatures.insert(e, s, tx)
-
-
-@define
-class VotingRound:
-    # epoch corresponding to the round
-    voting_epoch: VotingEpoch
-
-    ftso: VotingRoundProtocol[FtsoSubmit1, FtsoSubmit2, SubmitSignatures] = field(
-        factory=VotingRoundProtocol
-    )
-    fdc: VotingRoundProtocol[FdcSubmit1, FdcSubmit2, SubmitSignatures] = field(
-        factory=VotingRoundProtocol
-    )
-
-
-@define
-class VotingRoundManager:
-    finalized: int
-    rounds: dict[VotingEpoch, VotingRound] = field(factory=dict)
-
-    def get(self, v: VotingEpoch) -> VotingRound:
-        if v not in self.rounds:
-            self.rounds[v] = VotingRound(v)
-        return self.rounds[v]
-
-    def finalize(self, block: BlockData) -> list[VotingRound]:
-        assert "timestamp" in block
-        keys = list(self.rounds.keys())
-
-        rounds = []
-        for k in keys:
-            if k.id <= self.finalized:
-                self.rounds.pop(k, None)
-                continue
-
-            # need to wait until end of next epoch for fdc reveal offence condition
-            round_completed = k.next.end_s < block["timestamp"]
-
-            if round_completed:
-                self.finalized = max(self.finalized, k.id)
-                rounds.append(self.rounds.pop(k))
-
-        return rounds

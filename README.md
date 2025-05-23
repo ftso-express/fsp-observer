@@ -12,7 +12,7 @@ currently we support push notification over:
 - telegram bot sendMessage method
 - generic url post
 
-All of these can be configured via env variables. All of these have `NOTIFICATION` and 
+All of these can be configured via env variables. All of these have a `NOTIFICATION` prefix and 
 aren't a required value for the observer to start. All example values below
 
 ```bash
@@ -49,7 +49,7 @@ todos:
         - [x] check submit signatures signature against finalization 
     - fdc:
         - [ ] sample minimal conditions
-        - [ ] correct bitvote length (submit2 fdc)
+        - [x] correct bitvote length (submit2 fdc)
         - [x] check submit signatures signature against finalization 
     - fast updates:
         - [ ] recover signature from fast updates and check if updates are being made 

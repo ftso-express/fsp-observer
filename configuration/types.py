@@ -8,7 +8,9 @@ from py_flare_common.fsp.epoch.epoch import RewardEpoch, VotingEpoch
 from py_flare_common.fsp.epoch.factory import RewardEpochFactory, VotingEpochFactory
 from web3 import Web3
 
-from observer.utils import un_prefix_0x
+
+def un_prefix_0x(to_unprefixed: str) -> str:
+    return to_unprefixed.removeprefix("0x")
 
 
 def abi_from_file_location(file_location):
@@ -146,6 +148,7 @@ class Contracts:
     FlareSystemsManager: Contract
     Relay: Contract
     Submission: Contract
+    FdcHub: Contract
 
     @classmethod
     def get_contracts(cls, w: Web3) -> Self:
