@@ -5,11 +5,9 @@ import time
 from typing import Self
 from aiohttp import ClientSession
 
-import requests
-from attrs import define
 from eth_account._utils.signing import to_standard_v
 from eth_keys.datatypes import Signature as EthSignature
-from py_flare_common.fsp.epoch.epoch import RewardEpoch, VotingEpoch
+from py_flare_common.fsp.epoch.epoch import RewardEpoch
 from py_flare_common.fsp.messaging import (
     parse_generic_tx,
     parse_submit1_tx,
@@ -24,13 +22,8 @@ from web3 import AsyncWeb3
 from web3._utils.events import get_event_data
 from web3.middleware import ExtraDataToPOAMiddleware
 
-from configuration.config import ChainId
 from configuration.types import (
     Configuration,
-    NotificationDiscord,
-    NotificationGeneric,
-    NotificationSlack,
-    NotificationTelegram,
 )
 from observer.reward_epoch_manager import (
     Entity,
@@ -48,6 +41,12 @@ from observer.types import (
     VoterRegistrationInfo,
     VoterRemoved,
 )
+
+from .message import Message, MessageLevel
+from .notification import notify_discord, notify_generic, notify_slack, notify_telegram
+
+from .message import Message, MessageLevel
+from .notification import notify_discord, notify_generic, notify_slack, notify_telegram
 
 # from aioprometheus import Counter, Gauge
 from aioprometheus.service import Service
@@ -119,6 +118,7 @@ def notify_generic(config: NotificationGeneric, issue: "Issue") -> None:
         json={"level": issue.level.value, "message": issue.message},
     )
     PROM_LOG_MESSAGES_SENT.inc({"type": "generic"})
+        )
 
 
 async def find_voter_registration_blocks(
@@ -308,6 +308,7 @@ class MessageBuilder:
 
 
 async def log_issue(config: Configuration, issue: Issue):
+def log_issue(config: Configuration, issue: Message):
     LOGGER.log(issue.level.value, issue.message)
 
     n = config.notification
@@ -351,11 +352,10 @@ def extract[T](
 
 
 def validate_ftso(round: VotingRound, entity: Entity, config: Configuration):
-    mb = (
-        MessageBuilder()
-        .add_network(config.chain_id)
-        .add_round(round.voting_epoch)
-        .add_protocol(100)
+    mb = Message.builder().add(
+        network=config.chain_id,
+        round=round.voting_epoch,
+        protocol=100,
     )
 
     epoch = round.voting_epoch
@@ -370,14 +370,14 @@ def validate_ftso(round: VotingRound, entity: Entity, config: Configuration):
         _submit2, epoch.id, range(epoch.next.start_s, epoch.next.reveal_deadline())
     )
 
-    sig_deadline = max(
-        epoch.next.start_s + 55, (finalization and finalization.timestamp) or 0
+    sig_grace = max(
+        epoch.next.start_s + 55 + 1, (finalization and finalization.timestamp + 1) or 0
     )
     _submit_sig = ftso.submit_signatures.by_identity.get(entity.identity_address, [])
     submit_sig = extract(
         _submit_sig,
         epoch.id,
-        range(epoch.next.reveal_deadline(), sig_deadline),
+        range(epoch.next.reveal_deadline(), sig_grace),
     )
 
     # TODO:(matej) check for transactions that happened too late (or too early)
@@ -408,6 +408,9 @@ def validate_ftso(round: VotingRound, entity: Entity, config: Configuration):
         )        
         PROM_EVENT_COUNTER.inc(
             { "type": "no_submit2_transaction" }
+            mb.build(
+                MessageLevel.CRITICAL, "no submit2 transaction, causing reveal offence"
+            )
         )
 
     if s2:
@@ -417,12 +420,13 @@ def validate_ftso(round: VotingRound, entity: Entity, config: Configuration):
 
         if indices:
             issues.append(
-                Issue(
-                    IssueLevel.WARNING,
-                    mb.build_with_message(
-                        f"submit 2 had 'None' on indices {', '.join(indices)}"
-                    ),
+                mb.build(
+                    MessageLevel.WARNING,
+                    f"submit 2 had 'None' on indices {', '.join(indices)}",
                 )
+            )
+            PROM_EVENT_COUNTER.inc(
+                {"type": "submit2_none_indices" }
             )
             PROM_EVENT_COUNTER.inc(
                 {"type": "submit2_none_indices" }
@@ -438,12 +442,13 @@ def validate_ftso(round: VotingRound, entity: Entity, config: Configuration):
 
         if submit_1[0].payload.commit_hash.hex() != hashed:
             issues.append(
-                Issue(
-                    IssueLevel.CRITICAL,
-                    mb.build_with_message(
-                        "commit hash and reveal didn't match, causing reveal offence"
-                    ),
+                mb.build(
+                    MessageLevel.CRITICAL,
+                    "commit hash and reveal didn't match, causing reveal offence",
                 ),
+            )
+            PROM_EVENT_COUNTER.inc(
+                {"type": "commit_hash_and_reveal_diff" }
             )
             PROM_EVENT_COUNTER.inc(
                 {"type": "commit_hash_and_reveal_diff" }
@@ -451,10 +456,7 @@ def validate_ftso(round: VotingRound, entity: Entity, config: Configuration):
 
     if not ss:
         issues.append(
-            Issue(
-                IssueLevel.ERROR,
-                mb.build_with_message("no submit signatures transaction"),
-            ),
+            mb.build(MessageLevel.ERROR, "no submit signatures transaction"),
         )
 
     if finalization and ss:
@@ -465,11 +467,9 @@ def validate_ftso(round: VotingRound, entity: Entity, config: Configuration):
 
         if addr != entity.signing_policy_address:
             issues.append(
-                Issue(
-                    IssueLevel.ERROR,
-                    mb.build_with_message(
-                        "submit signatures signature doesn't match finalization"
-                    ),
+                mb.build(
+                    MessageLevel.ERROR,
+                    "submit signatures signature doesn't match finalization",
                 ),
             )
 
@@ -477,11 +477,10 @@ def validate_ftso(round: VotingRound, entity: Entity, config: Configuration):
 
 
 def validate_fdc(round: VotingRound, entity: Entity, config: Configuration):
-    mb = (
-        MessageBuilder()
-        .add_network(config.chain_id)
-        .add_round(round.voting_epoch)
-        .add_protocol(200)
+    mb = Message.builder().add(
+        network=config.chain_id,
+        round=round.voting_epoch,
+        protocol=200,
     )
 
     epoch = round.voting_epoch
@@ -496,14 +495,19 @@ def validate_fdc(round: VotingRound, entity: Entity, config: Configuration):
         _submit2, epoch.id, range(epoch.next.start_s, epoch.next.reveal_deadline())
     )
 
-    sig_deadline = max(
-        epoch.next.start_s + 55, (finalization and finalization.timestamp) or 0
+    sig_grace = max(
+        epoch.next.start_s + 55 + 1, (finalization and finalization.timestamp + 1) or 0
     )
     _submit_sig = fdc.submit_signatures.by_identity.get(entity.identity_address, [])
     submit_sig = extract(
         _submit_sig,
         epoch.id,
-        range(epoch.next.reveal_deadline(), sig_deadline),
+        range(epoch.next.reveal_deadline(), sig_grace),
+    )
+    submit_sig_deadline = extract(
+        _submit_sig,
+        epoch.id,
+        range(epoch.next.reveal_deadline(), epoch.next.end_s),
     )
 
     # TODO:(matej) check for transactions that happened too late (or too early)
@@ -513,40 +517,42 @@ def validate_fdc(round: VotingRound, entity: Entity, config: Configuration):
     s1 = submit_1 is not None
     s2 = submit_2 is not None
     ss = submit_sig is not None
+    ssd = submit_sig_deadline is not None
 
     if not s1:
         # NOTE:(matej) this is expected behaviour in fdc
         pass
 
     if not s2:
-        issues.append(
-            Issue(
-                IssueLevel.ERROR,
-                mb.build_with_message("no submit2 transaction"),
-            ),
-        )
+        issues.append(mb.build(MessageLevel.ERROR, "no submit2 transaction"))
 
     if s2:
         # TODO:(matej) analize request array and report unproven errors
         ...
 
-    if s2 and not ss:
+    if s2 and not ssd:
         # TODO:(matej) check if submit2 bitvote dominated consensus bitvote
         issues.append(
-            Issue(
-                IssueLevel.CRITICAL,
-                mb.build_with_message(
-                    "no submit signatures transaction, causing reveal offence"
+            mb.build(
+                MessageLevel.CRITICAL,
+                "no submit signatures transaction, causing reveal offence",
+            )
+        )
+
+    if s2 and ssd and not ss:
+        issues.append(
+            mb.build(
+                MessageLevel.ERROR,
+                (
+                    "no submit signatures transaction during grace period, "
+                    "causing loss of rewards"
                 ),
-            ),
+            )
         )
 
     if not s2 and not ss:
         issues.append(
-            Issue(
-                IssueLevel.ERROR,
-                mb.build_with_message("no submit signatures transaction"),
-            ),
+            mb.build(MessageLevel.ERROR, "no submit signatures transaction"),
         )
 
     if finalization and ss:
@@ -557,12 +563,10 @@ def validate_fdc(round: VotingRound, entity: Entity, config: Configuration):
 
         if addr != entity.signing_policy_address:
             issues.append(
-                Issue(
-                    IssueLevel.ERROR,
-                    mb.build_with_message(
-                        "submit signatures signature doesn't match finalization"
-                    ),
-                ),
+                mb.build(
+                    MessageLevel.ERROR,
+                    "submit signatures signature doesn't match finalization",
+                )
             )
 
     return issues
@@ -651,13 +655,11 @@ async def observer_loop(config: Configuration) -> None:
     tia = w.to_checksum_address(config.identity_address)
     await log_issue(
         config,
-        Issue(
-            IssueLevel.INFO,
-            MessageBuilder()
-            .add_network(config.chain_id)
-            .build_with_message(
-                f"Initialized observer for identity_address={tia}",
-            ),
+        Message.builder()
+        .add(network=config.chain_id)
+        .build(
+            MessageLevel.INFO,
+            f"Initialized observer for identity_address={tia}",
         ),
     )
     # target_voter = signing_policy.entity_mapper.by_identity_address[tia]
