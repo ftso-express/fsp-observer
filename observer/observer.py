@@ -1,4 +1,3 @@
-import logging
 import time
 from typing import Self
 
@@ -45,11 +44,7 @@ from .voting_round import (
     WTxData,
 )
 
-LOGGER = logging.getLogger(__name__)
-logging.basicConfig(
-    format="%(asctime)s\t%(levelname)s\t%(name)s\t%(message)s",
-    level="INFO",
-)
+from loguru import logger as LOGGER
 
 
 class Signature(EthSignature):
