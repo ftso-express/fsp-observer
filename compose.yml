@@ -1,0 +1,32 @@
+---
+name: "${DOCKER_COMPOSE_NAME}"
+
+x-logging-settings-local: &logging-settings-local
+  logging: 
+    driver: "local" 
+    options: 
+      max-size: "10m" 
+      max-file: "3"
+
+x-general-settings: &general-settings
+  restart: unless-stopped
+  stdin_open: true # docker run -i
+  tty: true        # docker run -t  
+
+services:
+  flare-fsp-observer:
+    image: "${DOCKER_COMPOSE_IMAGE}"
+    hostname: "${DOCKER_COMPOSE_NAME}-flare"
+    container_name: "${DOCKER_COMPOSE_NAME}-flare"
+    env_file: 
+    - ./configuration/app/flare.env
+    <<: [ *logging-settings-local, *general-settings ]
+  
+  songbird-fsp-observer:
+    image: "${DOCKER_COMPOSE_IMAGE}"
+    hostname: "${DOCKER_COMPOSE_NAME}-songbird"
+    container_name: "${DOCKER_COMPOSE_NAME}-songbird"
+    env_file: 
+    - ./configuration/app/songbird.env
+    <<: [ *logging-settings-local, *general-settings ]
+    
